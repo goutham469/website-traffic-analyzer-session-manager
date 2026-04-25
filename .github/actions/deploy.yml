@@ -1,0 +1,100 @@
+name: website-traffic-analyzer-session-manager
+
+on:
+  push :
+    branches: [ "master" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        id: checkout
+      
+      
+      - name: Write EC2 SSH key to file
+        run: |
+          echo "${{secrets.EC2_SSH_KEY}}" > ec2_key.pem
+          chmod 600 ec2_key.pem
+
+          
+      - name: Deploy on EC2
+        env:
+            EC2_IP: ${{ secrets.EC2_PUBLIC_IP }}
+            GH_USER: ${{ secrets.USER_NAME_GITHUB }}
+            REPO: ${{ secrets.REPO_NAME }}
+            PORT: ${{ secrets.PORT }}
+            DOMAIN: ${{ secrets.DOMAIN }}
+            EMAIL_FOR_CERTBOT: ${{ secrets.EMAIL_FOR_CERTBOT }}
+        run: |
+            ssh -o StrictHostKeyChecking=no -i ec2_key.pem ubuntu@"$EC2_IP" << EOF
+              set -e
+
+              sudo apt-get update -y
+              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+              sudo apt-get install -y nodejs git
+              sudo npm i -g pm2
+
+              cd /home/ubuntu
+
+              if [ -d "$REPO/.git" ]; then
+                cd "$REPO"
+                git fetch --all
+                git reset --hard origin/master
+              else
+                rm -rf "$REPO"
+                git clone "https://github.com/$GH_USER/$REPO.git" "$REPO"
+                cd "$REPO"
+                git fetch --all
+                git reset --hard origin/master
+              fi
+
+              # listing out files and directories for debugging purpose
+              dir
+
+              # write env fresh (no interactive editor)
+              printf "PORT=%s\n" "$PORT" > .env
+
+              npm ci || npm install
+              pm2 delete "$REPO" || true
+              pm2 start index.js --name "$REPO" --update-env
+              pm2 save
+              pm2 startup systemd -u ubuntu --hp /home/ubuntu | tail -n 1 | sudo bash
+
+              # install nginx and configure it as reverse proxy
+              sudo apt-get install -y nginx
+              sudo rm -f /etc/nginx/sites-enabled/default
+
+              # remove existing nginx configuration for the domain if exists
+              if [ -f "/etc/nginx/sites-available/$DOMAIN" ]; then
+                sudo rm -f /etc/nginx/sites-available/"$DOMAIN"
+                sudo rm -f /etc/nginx/sites-enabled/"$DOMAIN"
+              fi
+
+              # create new nginx configuration for the domain
+              sed "s/DOMAIN_PLACEHOLDER/$DOMAIN/g; s/PORT_PLACEHOLDER/$PORT/g" domain_setting/nginx.conf \
+              | sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null
+
+              # create symbolic link for nginx configuration and restart nginx
+              sudo ln -s /etc/nginx/sites-available/"$DOMAIN" /etc/nginx/sites-enabled/
+              sudo nginx -t
+              sudo systemctl restart nginx
+
+              # install certbot for nginx
+              sudo apt-get update -y
+              sudo apt-get install -y certbot python3-certbot-nginx
+
+              # get + install certificate (non-interactive)
+              # put a real email here (or store as secret CERTBOT_EMAIL)
+              sudo certbot --nginx \
+                -d "$DOMAIN" \
+                --non-interactive --agree-tos \
+                -m "$EMAIL_FOR_CERTBOT" \
+                --redirect
+
+              # verify auto-renewal is scheduled
+              sudo systemctl status certbot.timer --no-pager || true
+              sudo certbot renew --dry-run
+            EOF

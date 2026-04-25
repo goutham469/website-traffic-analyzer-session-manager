@@ -1,6 +1,7 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+require("dotenv").config()
 
 const app = express();
 app.use(express.json());
@@ -71,10 +72,16 @@ app.post("/visit", (req, res) => {
     res.json({ success: true });
 });
 
+app.get("/", (req, res) => {
+    res.send("I am fine...")
+})
+
 app.get("/live-sessions", (req,res) => {
     res.json(sessions);
 })
 
+const {PORT} = process.env;
+
 server.listen(5000, () => {
-    console.log("Server running on port 5000");
+    console.log("Server running on port ", PORT);
 });
